@@ -34,6 +34,10 @@ public:
     // Getter for the size of outputQueue
     size_t getOutputQueueSize() const;
 
+    // Redirect Path for output
+    std::string inputFile;
+    std::string outputFile;
+
 private:
     //pipes = default;
     Pipes(const Pipes&) = delete;

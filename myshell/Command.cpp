@@ -1,18 +1,26 @@
 #include "Command.h"
 #include "Globals.h"
+#include "CommandsShell.h"
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sstream>
 #include <cstring>
 #include <fcntl.h>
 #include <future> // Include for std::async
+#include <iostream> // Include for std::cout
 
-Command::Command(const std::string& cmdName, const std::vector<std::string>& cmdArgs, bool shellCommand)
-    : name(cmdName), args(cmdArgs), isShellCommand(checkIfShellCommand()) {}
+Command::Command(const std::string& cmdName, const std::vector<std::string>& cmdArgs)
+    : name(cmdName), args(cmdArgs) {}
 
 // Initialize the set of native commands
-const std::unordered_set<std::string> Command::nativeCommands = {
-    "my_ls", "my_wc"  // Add native command names here
+// Map for commands without additional arguments
+const std::unordered_map<std::string, std::function<void(size_t, const std::vector<std::string>&)>> Command::nativeCommands = {
+    {"fileRedirect", CommandsShell::fileRedirect},
+    {"echo", CommandsShell::echo},
+    {"ls", CommandsShell::ls},
+    {"wc", CommandsShell::wc},
+    {"cat", CommandsShell::cat},
+    {"grep", CommandsShell::grep}
 };
 
 // Private method to check if the command is native
@@ -21,7 +29,10 @@ bool Command::checkIfShellCommand() const {
 }
 
 void Command::execute(size_t index) {
-    if (isShellCommand) {
+    //Debug std::cout << "hello from execute" << std::endl;
+    //Debug std::cout << name << std::endl;
+    //Debug std::cout << checkIfShellCommand() << std::endl;
+    if (checkIfShellCommand()) {
         executeShellCommand(index);
     }
     else {
@@ -45,23 +56,8 @@ void Command::setInputFromQueue(std::queue<std::string>& inputQueue) {
 
 void Command::executeShellCommand(size_t index) {
     // Simulate command execution by processing input and placing results in outputQueue
-    while (true) {
-        // Fetch the next item from the input queue
-        std::string input = pipes.popFromOutputQueue(index);
-
-        // Break the loop if input is empty and command at index is finished
-        if (input.empty() && pipes.isCommandFinished(index)) {
-            break;
-        }
-
-        // Example of a shell command, like `echo` for demonstration
-        if (name == "echo") {
-            std::string output = input + " " + (args.empty() ? "" : args[0]);  // Basic echo functionality
-            pipes.pushToOutputQueue(index + 1, output);  // Place result in output queue
-        }
-
-        // Additional shell command handling as needed...
-    }
+    auto funcNoArgs = Command::nativeCommands.at(name);
+    funcNoArgs(index, Command::args);
 }
 
 
@@ -69,82 +65,94 @@ void Command::executeShellCommand(size_t index) {
 void Command::executeLinuxCommand(size_t index) {
     IOBufferAdapter ioAdapter(256);
 
-    // Fill buffer initially if input queue has data
-    std::string inputData = pipes.popFromOutputQueue(index);
-    if (!inputData.empty()) {
-        ioAdapter.fillBufferFromPipe(index);
+    std::vector<std::string> argsFromQueue;
+
+    // If index is 0, collect arguments from the input queue
+    if (index == 0) {
+        while (true) {
+            std::string inputData = pipes.popFromOutputQueue(index);
+            if (inputData.empty()) {
+                if (pipes.isCommandFinished(index)) break; // Exit if upstream is finished
+                continue; // Wait for more input
+            }
+            argsFromQueue.push_back(inputData); // Collect arguments
+        }
     }
 
-    // Fork the process to run the command
+    // Fork a new process
     pid_t pid = fork();
     if (pid < 0) {
-        // If fork fails, log to output and return
-        pipes.pushToOutputQueue(index + 1, "Failed to fork process.");
+        // Fork failed
+        pipes.pushToPrintQueue("Failed to fork process.");
         return;
     }
     else if (pid == 0) {
-        // Child process: setup IO redirection using IOBufferAdapter
-        dup2(ioAdapter.getReadFd(), STDIN_FILENO);   // Redirect stdin to IOBufferAdapter's read end
-        dup2(ioAdapter.getWriteFd(), STDOUT_FILENO); // Redirect stdout to IOBufferAdapter's write end
+        // Child process: Redirect IO and execute the command
+        if (index != 0) {
+            dup2(ioAdapter.getReadFd(), STDIN_FILENO);   // Redirect stdin for non-index-0 commands
+        }
+        dup2(ioAdapter.getWriteFd(), STDOUT_FILENO); // Redirect stdout to write end
 
         // Prepare arguments for execvp
         std::vector<char*> execArgs;
         execArgs.push_back(const_cast<char*>(name.c_str()));
-        for (const auto& arg : args) {
-            execArgs.push_back(const_cast<char*>(arg.c_str()));
+
+        // Add arguments from the queue for index 0
+        if (index == 0) {
+            for (const auto& arg : argsFromQueue) {
+                execArgs.push_back(const_cast<char*>(arg.c_str()));
+            }
         }
-        execArgs.push_back(nullptr);
+        else {
+            // Add normal arguments for other commands
+            for (const auto& arg : args) {
+                execArgs.push_back(const_cast<char*>(arg.c_str()));
+            }
+        }
+        execArgs.push_back(nullptr); // Null-terminate the argument list
 
         // Execute the command
         execvp(execArgs[0], execArgs.data());
-        _exit(EXIT_FAILURE);  // Exit if execvp fails
+        _exit(EXIT_FAILURE); // Exit if execvp fails
     }
     else {
-        // Parent process: manage IOBufferAdapter to capture output
+        // Parent process: Capture and forward output
         char buffer[256];
         ssize_t bytesRead;
-        std::string result;
+        std::string partialLine;
 
-        // Continue reading output until the child process completes
         while (true) {
-            // Read from buffer and collect results
             bytesRead = ioAdapter.readFromBuffer(buffer, sizeof(buffer) - 1);
             if (bytesRead > 0) {
                 buffer[bytesRead] = '\0';
-                result += buffer;
-            }
+                partialLine += buffer;
 
-            // Check if child has finished executing
-            int status;
-            pid_t result_pid = waitpid(pid, &status, WNOHANG); // Non-blocking wait
-            if (result_pid == pid && WIFEXITED(status)) {
-                break;  // Break when the child finishes
-            }
-
-            // Process and push each line to the next stage's queue if any output has been collected
-            if (!result.empty()) {
-                std::istringstream resultStream(result);
+                // Process and push lines
+                std::istringstream resultStream(partialLine);
                 std::string line;
                 while (std::getline(resultStream, line)) {
                     pipes.pushToOutputQueue(index + 1, line);
                 }
-                result.clear();
+                if (!resultStream.eof()) {
+                    partialLine.clear();
+                }
+                else {
+                    partialLine = line;
+                }
+            }
+
+            // Check if the child process has finished
+            int status;
+            pid_t result_pid = waitpid(pid, &status, WNOHANG);
+            if (result_pid == pid && WIFEXITED(status)) {
+                break;
             }
         }
 
-        // Close adapter’s read end and finalize output processing
         ioAdapter.closeReadEnd();
-
-        // Push any remaining output after the loop
-        if (!result.empty()) {
-            std::istringstream resultStream(result);
-            std::string line;
-            while (std::getline(resultStream, line)) {
-                pipes.pushToOutputQueue(index + 1, line);
-            }
+        if (!partialLine.empty()) {
+            pipes.pushToOutputQueue(index + 1, partialLine);
         }
     }
-
-    // Mark the command's output as complete
-    pipes.setCommandFinished(index + 1);
 }
+

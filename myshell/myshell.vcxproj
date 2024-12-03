@@ -76,6 +76,7 @@
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
     <ClCompile Include="Command.cpp" />
+    <ClCompile Include="CommandsShell.cpp" />
     <ClCompile Include="Globals.cpp" />
     <ClCompile Include="IOBufferAdapter.cpp" />
     <ClCompile Include="main.cpp" />
@@ -85,6 +86,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Command.h" />
+    <ClInclude Include="CommandsShell.h" />
     <ClInclude Include="Globals.h" />
     <ClInclude Include="IOBufferAdapter.h" />
     <ClInclude Include="PipeManager.h" />

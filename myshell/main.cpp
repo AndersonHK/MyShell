@@ -15,29 +15,47 @@
 #include "PipeManager.h"
 #include "Shell.h"
 
-// Global variable to hold the path sent by the explorer
-std::string pendingPath;
-
 void signalHandler(int signum) {
-    // Ensure pendingPath is clear before appending
-    pendingPath.clear();
-
     if (signum == SIGUSR1) {
-        // Read the shared path
-        std::ifstream inFile("/tmp/shared_path.txt");
-        if (inFile) {
-            std::getline(inFile, pendingPath);
-            inFile.close();
+        try {
+            std::ifstream inFile("/tmp/shared_path.txt");
+            if (inFile) {
+                std::getline(inFile, pendingPath);
+                inFile.close();
 
-            // Append the path to readline's buffer
-            if (!pendingPath.empty()) {
-                rl_insert_text(pendingPath.c_str());
-                rl_redisplay();  // Refresh the prompt
+                if (!pendingPath.empty()) {
+                    pathPending.store(true);
+                }
+
+                // Clear the shared file
+                std::remove("/tmp/shared_path.txt");
             }
-
-            // Clear the shared file
-            std::remove("/tmp/shared_path.txt");
         }
+        catch (...) {
+            // Handle unexpected errors gracefully
+        }
+    }
+}
+
+void setupSignalHandler() {
+    struct sigaction sa;
+
+    // Zero out the sigaction structure
+    memset(&sa, 0, sizeof(sa));
+
+    // Assign the signal handler function
+    sa.sa_handler = signalHandler;
+
+    // Use the SA_RESTART flag to automatically restart interrupted system calls
+    sa.sa_flags = SA_RESTART;
+
+    // Block all other signals while the handler is executing
+    sigemptyset(&sa.sa_mask);
+
+    // Register the signal handler for SIGUSR1
+    if (sigaction(SIGUSR1, &sa, nullptr) == -1) {
+        perror("sigaction failed");
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -263,8 +281,8 @@ int main(int argc, char* argv[]) {
     // Load settings from a file, creating it if necessary
     loadSettings(configFile);
 
-    // Register the signal handler
-    signal(SIGUSR1, signalHandler);
+    // Register the signal handler using sigaction
+    setupSignalHandler();
 
     // Initialize and start the shell
     Shell shell;
