@@ -14,6 +14,7 @@ extern bool debugMode;
 // Global variable to hold the path sent by the explorer
 extern std::atomic<bool> pathPending;  // Flag for pending path
 extern std::string pendingPath;              // The path to append
+extern const std::string pipePath;
 
 void dmsg(const std::string& message);
 void dPrint(const std::string& message);

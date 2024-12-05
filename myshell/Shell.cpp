@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <unistd.h>  // For chdir
+#include <fcntl.h> // For pipe open
 
 Shell::Shell() : isRunning(true) {}
 
@@ -43,6 +44,9 @@ std::string Shell::preprocessCommand(const std::string& command) {
 
 // Global pointer to the current shell instance
 Shell* g_shellInstance = nullptr;
+
+// File descriptor for the pipe
+int pipeFd = -1;
 
 void readlineCallback(char* line) {
     if (g_shellInstance) {
@@ -86,26 +90,55 @@ void Shell::run() {
     // Set the global pointer to this instance
     g_shellInstance = this;
 
+    // Open the named pipe for reading
+    pipeFd = open(pipePath.c_str(), O_RDONLY | O_NONBLOCK);
+    if (pipeFd == -1) {
+        perror("Error opening named pipe");
+        exit(EXIT_FAILURE);
+    }
+
     // Install the readline callback
     rl_callback_handler_install("shell> ", readlineCallback);
 
     // Main event loop
     while (isRunning) {
-        // Allow readline to process input
-        rl_callback_read_char();
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
 
-        // Check for signal-triggered updates after readline processes input
-        if (pathPending.load()) {
-            // Safely update the input line
-            rl_replace_line((std::string(rl_line_buffer) + " " + pendingPath).c_str(), 1);
-            rl_redisplay();
+        // Add stdin and pipe to the monitored set
+        FD_SET(STDIN_FILENO, &read_fds);
+        FD_SET(pipeFd, &read_fds);
 
-            // Reset the flag
-            pathPending.store(false);
+        int max_fd = std::max(STDIN_FILENO, pipeFd);
+        if (select(max_fd + 1, &read_fds, nullptr, nullptr, nullptr) > 0) {
+            // Check if input is available on stdin
+            if (FD_ISSET(STDIN_FILENO, &read_fds)) {
+                rl_callback_read_char();
+            }
+
+            // Check if data is available on the pipe
+            if (FD_ISSET(pipeFd, &read_fds)) {
+                char buffer[128];
+                ssize_t bytesRead = read(pipeFd, buffer, sizeof(buffer) - 1);
+                if (bytesRead > 0) {
+                    buffer[bytesRead] = '\0';  // Null-terminate the string
+                    //DEBUG: std::cout << "Shell: Received " << bytesRead << " bytes from pipe: '" << pendingPath << "'" << std::endl;
+                    pendingPath = std::string(buffer);  // Store the new path
+                    pathPending.store(true);
+
+                    // Update readline input line
+                    rl_replace_line((std::string(rl_line_buffer) + " " + pendingPath).c_str(), 1);
+                    rl_redisplay();
+
+                    // Reset the flag
+                    pathPending.store(false);
+                }
+            }
         }
     }
 
     rl_callback_handler_remove();  // Cleanup readline
+    close(pipeFd);  // Close the pipe
     std::cout << "Exiting shell..." << std::endl;
 }
 

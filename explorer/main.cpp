@@ -6,7 +6,9 @@
 #include <string>
 #include <cstdlib> // For system()
 #include <ncurses.h>  // For ncurses functions
-
+#include <unistd.h> // for unlink()
+#include <csignal> // for signal()
+#include <fcntl.h> // for pipes
 
 namespace fs = std::filesystem;
 
@@ -135,7 +137,25 @@ std::string escapePath(const std::string& path) {
     return escapedPath;
 }
 
+void cleanup() {
+    unlink("/tmp/myshell_pipe");
+    system("tmux kill-session -t myshell > /dev/null 2>&1");
+}
+
+// Signal handler for unexpected termination
+void signalHandler(int signum) {
+    cleanup();
+    exit(signum);  // Exit with the received signal
+}
+
+const std::string pipePath = "/tmp/myshell_pipe";
+
 int main() {
+    std::atexit(cleanup);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    std::signal(SIGSEGV, signalHandler);
+
     fs::path currentPath = fs::current_path();  // Start in the current directory
     initializeNcurses();  // Initialize ncurses
 
@@ -215,23 +235,21 @@ int main() {
                 // Get the selected file path
                 std::string selectedPath = entries[selectedIndex].path().string();
 
-                // Clear the shared file
-                std::remove("/tmp/shared_path.txt");
-
-                // Write the path to a shared file or global variable
-                std::ofstream outFile("/tmp/shared_path.txt");
-                if (outFile) {
-                    outFile << selectedPath;
-                    outFile.close();
-                }
-                else {
-                    std::cerr << "Error: Unable to write to shared file." << std::endl;
+                // Open the named pipe for writing
+                int pipeFd = open(pipePath.c_str(), O_WRONLY);
+                if (pipeFd == -1) {
+                    std::cerr << "Error: Unable to open pipe for writing." << std::endl;
                     continue;
                 }
 
-                // Send SIGUSR1 to the myshell process
-                std::string command = "pkill -SIGUSR1 -f myshell";
-                std::system(command.c_str());
+                // Write the selected path to the pipe
+                ssize_t bytesWritten = write(pipeFd, selectedPath.c_str(), selectedPath.size());
+                if (bytesWritten == -1) {
+                    std::cerr << "Error: Unable to write to the pipe." << std::endl;
+                }
+
+                // Close the pipe
+                close(pipeFd);
             }
             else if (key == KEY_UP) {  // Up arrow
                 if (selectedIndex > 0) {  // Allow moving up to `../`

@@ -10,6 +10,7 @@ Pipes pipes;  // Declare a global instance of Pipes
 // Global variable to hold the path sent by the explorer
 std::atomic<bool> pathPending(false);  // Flag for pending path
 std::string pendingPath;              // The path to append
+const std::string pipePath = "/tmp/myshell_pipe";
 
 // Debug messaging function
 void dmsg(const std::string& message) {

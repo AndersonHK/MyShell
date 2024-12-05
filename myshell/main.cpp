@@ -9,54 +9,23 @@
 #include <csignal>  // Required for signal handling
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/stat.h> // Require for pipe creation
 
 #include "Globals.h"
 #include "Command.h"
 #include "PipeManager.h"
 #include "Shell.h"
 
-void signalHandler(int signum) {
-    if (signum == SIGUSR1) {
-        try {
-            std::ifstream inFile("/tmp/shared_path.txt");
-            if (inFile) {
-                std::getline(inFile, pendingPath);
-                inFile.close();
-
-                if (!pendingPath.empty()) {
-                    pathPending.store(true);
-                }
-
-                // Clear the shared file
-                std::remove("/tmp/shared_path.txt");
-            }
-        }
-        catch (...) {
-            // Handle unexpected errors gracefully
-        }
-    }
+// Cleanup resources on exit
+void cleanup() {
+    unlink(pipePath.c_str());  // Remove the named pipe
+    system("tmux kill-session -t myshell > /dev/null 2>&1");  // Kill tmux session silently
 }
 
-void setupSignalHandler() {
-    struct sigaction sa;
-
-    // Zero out the sigaction structure
-    memset(&sa, 0, sizeof(sa));
-
-    // Assign the signal handler function
-    sa.sa_handler = signalHandler;
-
-    // Use the SA_RESTART flag to automatically restart interrupted system calls
-    sa.sa_flags = SA_RESTART;
-
-    // Block all other signals while the handler is executing
-    sigemptyset(&sa.sa_mask);
-
-    // Register the signal handler for SIGUSR1
-    if (sigaction(SIGUSR1, &sa, nullptr) == -1) {
-        perror("sigaction failed");
-        exit(EXIT_FAILURE);
-    }
+// Signal handler for unexpected termination
+void signalHandler(int signum) {
+    cleanup();
+    exit(signum);  // Exit with the received signal
 }
 
 // Function to create a default config file if it doesn't exist
@@ -207,7 +176,7 @@ int getTmuxWindowWidth() {
     return width;
 }
 
-void startTmuxSession(const std::string& shellProgramPath, const std::string& explorerProgramPath) {
+void startTmuxSession(const std::string& shellProgramPath, const std::string& explorerProgramPath, const std::string& pipePath) {
     // Check if the tmux session "myshell" already exists
     int sessionExists = system("tmux has-session -t myshell 2>/dev/null");
 
@@ -231,12 +200,12 @@ void startTmuxSession(const std::string& shellProgramPath, const std::string& ex
     std::string tmuxCommand =
         "tmux new-session -d -s myshell \\; "  // Start detached session named "myshell"
         "send-keys 'clear' C-m \\; "  // Clear the terminal in the first pane
-        "send-keys '" + shellProgramPath + "' C-m \\; "  // Start myshell in the first pane
+        "send-keys '" + shellProgramPath + " " + pipePath + "' C-m \\; "  // Start myshell with pipePath in the first pane
         "select-pane -T shell \\; "  // Name the first pane 'shell'
         "split-window -h \\; "  // Split the window horizontally
         "resize-pane -x " + std::to_string(halfWidth) + " \\; "  // Resize the left pane to half width
         "send-keys 'clear' C-m \\; "  // Clear the terminal in the new (right) pane
-        "send-keys '" + explorerProgramPath + "' C-m \\; "  // Run explorer in the new pane
+        "send-keys '" + explorerProgramPath + " " + pipePath + "' C-m \\; "  // Run explorer with pipePath in the new pane
         "select-pane -T explorer \\; "  // Name the second pane 'explorer'
         "select-pane -R \\; "  // Move focus to the right pane (optional)
         "attach-session -t myshell";  // Attach to the tmux session
@@ -269,11 +238,22 @@ int main(int argc, char* argv[]) {
             return 1; // Exit with error
         }
 
+        // Remove leftover named pipe from previous execution
+        unlink(pipePath.c_str());
+
+        // Create a new named pipe
+        if (mkfifo(pipePath.c_str(), 0666) == -1) {
+            if (errno != EEXIST) {
+                perror("Error creating named pipe");
+                return 1;
+            }
+        }
+
         // Construct the path to explorer.out dynamically
         std::string explorerProgramPath = std::string(homeDir) + "/projects/explorer/bin/x64/Debug/explorer.out";
 
         // Start the tmux session
-        startTmuxSession(shellProgramPath, explorerProgramPath);
+        startTmuxSession(shellProgramPath, explorerProgramPath, pipePath);
 
         return 0; // Exit after launching tmux
     }
@@ -281,8 +261,13 @@ int main(int argc, char* argv[]) {
     // Load settings from a file, creating it if necessary
     loadSettings(configFile);
 
-    // Register the signal handler using sigaction
-    setupSignalHandler();
+    // Register cleanup on normal exit
+    std::atexit(cleanup);
+
+    // Register signal handlers for crashes
+    std::signal(SIGINT, signalHandler);   // Handle Ctrl+C
+    std::signal(SIGTERM, signalHandler);  // Handle termination signals
+    std::signal(SIGSEGV, signalHandler);  // Handle segmentation faults
 
     // Initialize and start the shell
     Shell shell;
